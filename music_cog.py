@@ -291,23 +291,7 @@ class Track:
         else:
             return None
 
-        # METHOD 1: Official Spotify oEmbed API (Fastest & 100% reliable for tracks!)
-        if kind == "track":
-            try:
-                oembed_api = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{item_id}"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(oembed_api, headers=headers, timeout=aiohttp.ClientTimeout(total=4)) as resp:
-                        if resp.status == 200:
-                            oembed_data = await resp.json()
-                            title = oembed_data.get('title')
-                            author_name = oembed_data.get('author_name', '')
-                            thumbnail = oembed_data.get('thumbnail_url', '')
-                            if title:
-                                return [{"title": title, "artist": author_name, "thumbnail": thumbnail}]
-            except Exception as e:
-                logger.warning(f"oEmbed API failed for Spotify track: {e}")
-
-        # METHOD 2: Embed Scraping (__NEXT_DATA__ JSON)
+        # METHOD 1: Embed Scraping (__NEXT_DATA__ JSON - contains full artist list and track metadata)
         embed_url = f"https://open.spotify.com/embed/{kind}/{item_id}"
         try:
             async with aiohttp.ClientSession() as session:
@@ -317,27 +301,45 @@ class Track:
                         script_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">([^<]+)</script>', text)
                         if script_match:
                             data = json.loads(script_match.group(1))
-                            entity = data['props']['pageProps']['state']['data']['entity']
+                            entity = data.get('props', {}).get('pageProps', {}).get('state', {}).get('data', {}).get('entity', {})
                             if kind == "track":
                                 title = entity.get('name') or entity.get('title')
-                                artists = [a['name'] for a in entity.get('artists', []) if isinstance(a, dict) and 'name' in a]
-                                artist_name = ", ".join(artists) if artists else "Artist"
+                                artists = [a.get('name') for a in entity.get('artists', []) if isinstance(a, dict) and a.get('name')]
+                                artist_name = ", ".join(artists) if artists else ""
                                 covers = entity.get('coverArt', {}).get('sources', [])
                                 thumbnail = covers[0]['url'] if covers else ""
-                                return [{"title": title, "artist": artist_name, "thumbnail": thumbnail}]
+                                if title:
+                                    return [{"title": title, "artist": artist_name, "thumbnail": thumbnail}]
                             else:
                                 tracks_data = entity.get('trackList', [])
                                 results = []
                                 for t in tracks_data:
                                     title = t.get('title') or t.get('name')
-                                    artist = t.get('subtitle') or t.get('artist', 'Artist')
+                                    artist = t.get('subtitle') or t.get('artist', '')
                                     results.append({"title": title, "artist": artist, "thumbnail": ""})
                                 if results:
                                     return results
         except Exception as e:
             logger.warning(f"Failed fetching/parsing Spotify embed: {e}")
 
+        # METHOD 2: Official Spotify oEmbed API (Fallback for title if embed page blocked)
+        if kind == "track":
+            try:
+                oembed_api = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{item_id}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(oembed_api, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                        if resp.status == 200:
+                            oembed_data = await resp.json()
+                            title = oembed_data.get('title')
+                            author_name = oembed_data.get('author_name') or ""
+                            thumbnail = oembed_data.get('thumbnail_url', '')
+                            if title:
+                                return [{"title": title, "artist": author_name, "thumbnail": thumbnail}]
+            except Exception as e:
+                logger.warning(f"oEmbed API failed for Spotify track: {e}")
+
         return None
+
 
 
 def create_progress_bar(current, total, length=14):
