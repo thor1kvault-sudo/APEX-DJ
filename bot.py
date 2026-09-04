@@ -84,11 +84,19 @@ async def on_message(message: discord.Message):
                     voice_channel = message.author.voice.channel
 
                     async def connect_voice():
-                        if not player.voice_client or not player.voice_client.is_connected():
+                        guild_vc = message.guild.voice_client
+                        if not guild_vc or not guild_vc.is_connected():
+                            if guild_vc:
+                                try:
+                                    await guild_vc.disconnect(force=True)
+                                except Exception:
+                                    pass
                             player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=False)
-                        elif player.voice_client.channel != voice_channel:
-
-                            await player.voice_client.move_to(voice_channel)
+                        elif guild_vc.channel.id != voice_channel.id:
+                            await guild_vc.move_to(voice_channel)
+                            player.voice_client = guild_vc
+                        else:
+                            player.voice_client = guild_vc
 
                     async def resolve_tracks():
                         from music_cog import Track
