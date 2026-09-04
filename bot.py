@@ -99,12 +99,13 @@ async def on_message(message: discord.Message):
                         player.queue.extend(tracks)
                         
                         if not player.voice_client.is_playing() and not player.voice_client.is_paused():
-                            await player.play_next()
+                            await player.play_next(send_msg=True)
                         else:
                             count = len(tracks)
                             msg = f"➕ Auto-queued: **{tracks[0].title}**" if count == 1 else f"➕ Auto-queued **{count} tracks**!"
                             await message.channel.send(msg)
                             await player.update_now_playing_message()
+
                     except Exception as e:
                         logger.error(f"Auto link processing failed: {e}")
                         try:

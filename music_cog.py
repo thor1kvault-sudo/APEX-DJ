@@ -384,10 +384,18 @@ class MusicControlView(discord.ui.View):
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.player.queue.clear()
         self.player.autoplay = False
+        self.player.current_track = None
+        if self.player.now_playing_msg:
+            try:
+                await self.player.now_playing_msg.delete()
+            except Exception:
+                pass
+            self.player.now_playing_msg = None
         if self.player.voice_client:
             await self.player.voice_client.disconnect()
             self.player.voice_client = None
         await interaction.response.send_message("⏹ Stopped playback and cleared queue.", ephemeral=True)
+
 
     @discord.ui.button(label="AutoPlay", style=discord.ButtonStyle.red, emoji="🔄", row=2)
     async def autoplay_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
