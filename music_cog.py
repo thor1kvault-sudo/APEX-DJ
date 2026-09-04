@@ -91,15 +91,26 @@ class Track:
                 except Exception as e:
                     logger.error(f"Direct stream extraction failed: {e}")
             else:
-                # 1. Smart YouTube search (picks official original audio & official labels like Think Music, Sony South, etc.)
+                # 1. Native YouTube Innertube Flat Search + Smart Candidate Scoring (fast & unblocked on cloud datacenters)
                 try:
-                    video_url = await loop.run_in_executor(None, lambda q=raw_user_query: cls.search_youtube_smart(q))
-                    if video_url:
-                        data = await loop.run_in_executor(None, lambda u=video_url: _cached_extract(u))
+                    search_res = await loop.run_in_executor(None, lambda q=raw_user_query: ytdl_flat.extract_info(f"ytsearch5:{q}", download=False))
+                    entries = search_res.get('entries', []) if search_res else []
+                    best_entry = cls.select_best_original_entry(entries, raw_user_query)
+                    if best_entry and best_entry.get('url'):
+                        data = await loop.run_in_executor(None, lambda u=best_entry['url']: _cached_extract(u))
                 except Exception as e:
-                    logger.warning(f"Smart search failed for '{raw_user_query}': {e}")
+                    logger.warning(f"Innertube flat search failed for '{raw_user_query}': {e}")
 
-                # 2. Fast single-pass fallback
+                # 2. Smart HTML scraping fallback
+                if not data or not (data.get('url') or data.get('formats')):
+                    try:
+                        video_url = await loop.run_in_executor(None, lambda q=raw_user_query: cls.search_youtube_smart(q))
+                        if video_url:
+                            data = await loop.run_in_executor(None, lambda u=video_url: _cached_extract(u))
+                    except Exception as e:
+                        logger.warning(f"Smart search fallback failed for '{raw_user_query}': {e}")
+
+                # 3. Direct ytsearch1 single-pass fallback
                 if not data or not (data.get('url') or data.get('formats')):
                     try:
                         primary_query = f"ytsearch1:{raw_user_query}" if not raw_user_query.startswith(('ytsearch:', 'ytsearch1:')) else raw_user_query
@@ -111,7 +122,7 @@ class Track:
                     except Exception as e:
                         logger.warning(f"ytsearch1 fallback failed: {e}")
 
-                # 3. SoundCloud fallback if YouTube is unavailable
+                # 4. SoundCloud fallback if YouTube is completely unavailable
                 if not data or not (data.get('url') or data.get('formats')):
                     try:
                         sc_res = await loop.run_in_executor(None, lambda q=f"scsearch1:{raw_user_query}": _cached_extract(q))

@@ -23,7 +23,6 @@ FFMPEG_OPTIONS = {
 }
 
 
-# YTDLP Options for instant streaming & robust cloud compatibility (<2s startup)
 YTDL_FORMAT_OPTIONS = {
     'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -36,10 +35,10 @@ YTDL_FORMAT_OPTIONS = {
     'no_warnings': True,
     'default_search': 'auto',
     'geo_bypass': True,
-    'socket_timeout': 5,
+    'socket_timeout': 6,
     'extractor_args': {
         'youtube': {
-            'player_client': ['android']
+            'player_client': ['android', 'web']
         }
     }
 }
