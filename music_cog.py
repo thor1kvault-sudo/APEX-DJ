@@ -62,14 +62,15 @@ class Track:
 
         for item in tracks_to_process:
             if "query" in item and item["query"]:
-                search_q = item["query"]
+                raw_user_query = item["query"]
                 search_title = item.get("title")
                 spotify_thumb = item.get("thumbnail")
-                raw_user_query = search_q
             else:
                 track_title = item.get("title", "")
                 artist_name = item.get("artist", "")
-                raw_user_query = f"{track_title} {artist_name}"
+                clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', track_title).strip()
+                primary_artist = artist_name.split(',')[0].strip() if artist_name else ""
+                raw_user_query = f"{clean_title} {primary_artist}".strip() or track_title
                 search_title = f"{artist_name} - {track_title}" if artist_name else track_title
                 spotify_thumb = item.get("thumbnail")
 
@@ -79,88 +80,42 @@ class Track:
                 item["query"].endswith(('.mp3', '.m4a', '.wav', '.flac', '.ogg'))
             )
 
-
+            data = None
             if is_direct_url:
-                # Direct URL: extract stream directly (use cache for speed)
                 try:
                     data = await loop.run_in_executor(None, lambda q=item["query"]: _cached_extract(q))
                 except Exception as e:
-                    logger.error(f"yt-dlp extract failed for direct URL: {e}")
-                    data = None
+                    logger.error(f"Direct stream extraction failed: {e}")
             else:
-                # Search candidate list to ensure we never return 0 results
-                candidates_to_try = []
-                if "query" not in item:
-                    track_title = item.get("title", "")
-                    artist_name = item.get("artist", "")
-                    clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', track_title).strip()
-                    primary_artist = artist_name.split(',')[0].strip() if artist_name else ""
-                    
-                    if clean_title and primary_artist:
-                        candidates_to_try.append(f"ytsearch3:{clean_title} {primary_artist}")
-                    if track_title and primary_artist:
-                        candidates_to_try.append(f"ytsearch3:{track_title} {primary_artist}")
-                    if clean_title:
-                        candidates_to_try.append(f"ytsearch3:{clean_title}")
-                    if track_title:
-                        candidates_to_try.append(f"ytsearch3:{track_title}")
-                else:
-                    user_q = item["query"]
-                    if not user_q.startswith(('ytsearch:', 'ytsearch1:', 'ytsearch3:', 'ytsearch5:')):
-                        candidates_to_try.append(f"ytsearch3:{user_q}")
-                        candidates_to_try.append(f"ytsearch3:{user_q} song")
-                    else:
-                        candidates_to_try.append(user_q)
-
-                entries = []
-                # Try search candidates sequentially until entries found
-                for cand in candidates_to_try:
-                    try:
-                        flat_data = await loop.run_in_executor(None, lambda q=cand: ytdl_flat.extract_info(q, download=False))
-                        if flat_data and 'entries' in flat_data:
-                            valid = [e for e in flat_data['entries'] if e]
-                            if valid:
-                                entries = valid
-                                break
-                    except Exception as e:
-                        logger.warning(f"Flat search failed for candidate '{cand}': {e}")
-
-                video_url = None
-                if entries:
-                    best_entry = cls.select_best_original_entry(entries, raw_user_query)
-                    if not best_entry:
-                        best_entry = entries[0]
-                    video_url = best_entry.get('url') or best_entry.get('webpage_url')
-                    if video_url and not video_url.startswith(('http', 'https')):
-                        video_url = f"https://www.youtube.com/watch?v={best_entry.get('id', '')}"
-                else:
-                    logger.info(f"yt-dlp flat search returned 0 results for '{raw_user_query}'. Trying raw YouTube search scraper...")
-                    for cand in candidates_to_try:
-                        clean_cand = cand.replace("ytsearch3:", "").replace("ytsearch:", "").strip()
-                        raw_urls = await loop.run_in_executor(None, lambda q=clean_cand: cls.search_youtube_raw(q))
-                        if raw_urls:
-                            video_url = raw_urls[0]
-                            break
-
-                if not video_url:
-                    logger.warning(f"No results found for search candidates: {candidates_to_try}")
-                    continue
-
+                # Fast single-pass search (resolves in ~1-2s directly)
+                primary_query = f"ytsearch1:{raw_user_query}" if not raw_user_query.startswith(('ytsearch:', 'ytsearch1:')) else raw_user_query
                 try:
-                    data = await loop.run_in_executor(None, lambda u=video_url: _cached_extract(u))
+                    search_res = await loop.run_in_executor(None, lambda q=primary_query: _cached_extract(q))
+                    if search_res and 'entries' in search_res and search_res['entries']:
+                        data = search_res['entries'][0]
+                    elif search_res and search_res.get('url'):
+                        data = search_res
                 except Exception as e:
-                    logger.error(f"Stream extraction failed for {video_url}: {e}")
-                    data = None
+                    logger.warning(f"Fast ytsearch1 extraction failed: {e}")
 
+                # Fast raw HTML search fallback if needed
                 if not data:
-                    logger.info(f"YouTube stream failed. Trying SoundCloud search fallback for '{raw_user_query}'...")
                     try:
-                        sc_query = f"scsearch:{raw_user_query}"
-                        sc_data = await loop.run_in_executor(None, lambda: ytdl.extract_info(sc_query, download=False))
-                        if sc_data and 'entries' in sc_data and sc_data['entries']:
-                            data = sc_data['entries'][0]
+                        raw_urls = await loop.run_in_executor(None, lambda q=raw_user_query: cls.search_youtube_raw(q))
+                        if raw_urls:
+                            data = await loop.run_in_executor(None, lambda u=raw_urls[0]: _cached_extract(u))
+                    except Exception as e:
+                        logger.warning(f"Raw search fallback failed: {e}")
+
+                # SoundCloud fallback if YouTube is unavailable
+                if not data:
+                    try:
+                        sc_res = await loop.run_in_executor(None, lambda q=f"scsearch1:{raw_user_query}": _cached_extract(q))
+                        if sc_res and 'entries' in sc_res and sc_res['entries']:
+                            data = sc_res['entries'][0]
                     except Exception as sc_err:
                         logger.warning(f"SoundCloud fallback failed: {sc_err}")
+
 
 
 
