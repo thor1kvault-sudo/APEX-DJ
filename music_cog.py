@@ -87,13 +87,13 @@ class Track:
                 except Exception as e:
                     logger.error(f"Direct stream extraction failed: {e}")
             else:
-                # 1. Instant raw YouTube search (<0.5s search + ~2s stream extract = ~3-5s total!)
+                # 1. Smart YouTube search (picks official original audio & official labels like Think Music, Sony South, etc.)
                 try:
-                    raw_urls = await loop.run_in_executor(None, lambda q=raw_user_query: cls.search_youtube_raw(q))
-                    if raw_urls:
-                        data = await loop.run_in_executor(None, lambda u=raw_urls[0]: _cached_extract(u))
+                    video_url = await loop.run_in_executor(None, lambda q=raw_user_query: cls.search_youtube_smart(q))
+                    if video_url:
+                        data = await loop.run_in_executor(None, lambda u=video_url: _cached_extract(u))
                 except Exception as e:
-                    logger.warning(f"Raw search failed for '{raw_user_query}': {e}")
+                    logger.warning(f"Smart search failed for '{raw_user_query}': {e}")
 
                 # 2. Fast single-pass fallback
                 if not data:
@@ -115,6 +115,7 @@ class Track:
                             data = sc_res['entries'][0]
                     except Exception as sc_err:
                         logger.warning(f"SoundCloud fallback failed: {sc_err}")
+
 
 
 
@@ -183,28 +184,77 @@ class Track:
         return scored_entries[0][1]
 
     @staticmethod
-    def search_youtube_raw(query):
-        """Fallback direct YouTube HTML search scraper for datacenter IPs where yt-dlp flat search is blocked."""
+    def search_youtube_smart(query):
+        """Intelligently searches YouTube for the exact original song, prioritizing official labels and penalizing remixes/covers."""
         try:
             encoded_query = urllib.parse.quote(query)
             url = f"https://www.youtube.com/results?search_query={encoded_query}"
             req = urllib.request.Request(
                 url,
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                }
             )
-            html = urllib.request.urlopen(req, timeout=5).read().decode('utf-8')
-            video_ids = re.findall(r'/watch\?v=([a-zA-Z0-9_-]{11})', html)
-            if video_ids:
-                seen = set()
-                unique_urls = []
-                for vid in video_ids:
-                    if vid not in seen:
-                        seen.add(vid)
-                        unique_urls.append(f"https://www.youtube.com/watch?v={vid}")
-                return unique_urls[:3]
+            html = urllib.request.urlopen(req, timeout=4).read().decode('utf-8')
+            
+            m = re.search(r'var ytInitialData\s*=\s*({.+?});</script>', html)
+            if not m:
+                m = re.search(r'window\["ytInitialData"\]\s*=\s*({.+?});', html)
+            
+            candidates = []
+            if m:
+                data = json.loads(m.group(1))
+                sections = data.get('contents', {}).get('twoColumnSearchResultsRenderer', {}).get('primaryContents', {}).get('sectionListRenderer', {}).get('contents', [])
+                for sec in sections:
+                    item_section = sec.get('itemSectionRenderer', {}).get('contents', [])
+                    for item in item_section:
+                        vr = item.get('videoRenderer')
+                        if not vr:
+                            continue
+                        vid = vr.get('videoId')
+                        title = vr.get('title', {}).get('runs', [{}])[0].get('text', '')
+                        channel = vr.get('ownerText', {}).get('runs', [{}])[0].get('text', '')
+                        if vid and title:
+                            candidates.append({
+                                'id': vid,
+                                'title': title,
+                                'channel': channel,
+                                'url': f"https://www.youtube.com/watch?v={vid}"
+                            })
+            
+            if candidates:
+                user_wants_remix = any(w in query.lower() for w in ['remix', 'slowed', 'reverb', 'dj', 'mashup', 'cover', 'bass boosted', 'lofi'])
+                bad_keywords = ['remix', 'slowed', 'reverb', 'dj', 'bass boosted', 'mashup', 'cover', 'lofi', 'edit', 'tik tok', 'status', 'flip', 'ringtone', 'whatsapp', 'bgm', 'teaser', 'trailer']
+                
+                scored = []
+                for i, c in enumerate(candidates):
+                    t = c['title'].lower()
+                    ch = c['channel'].lower()
+                    score = 100 - (i * 5)
+                    
+                    # Penalize remixes/covers/edits when user wants the original
+                    if not user_wants_remix:
+                        for bad in bad_keywords:
+                            if bad in t:
+                                score -= 50
+                    
+                    # Boost official songs & lyric videos
+                    if any(w in t for w in ['official audio', 'official music video', 'official video', 'official song', 'full song', 'lyric video', 'official lyric']):
+                        score += 40
+                        
+                    # Boost official Indian/International music labels & topic channels
+                    if any(w in ch for w in ['topic', 'vevo', 'think music', 'sony music', 'saregama', 't-series', 'aditya music', 'lahari', 'zee music', 'muzik247', 'sun nxt', 'mass tamilan', 'speed audio', 'tips', 'anirudh', 'ar rahman', 'yuvan']):
+                        score += 35
+                        
+                    scored.append((score, c))
+                
+                scored.sort(key=lambda x: x[0], reverse=True)
+                return scored[0][1]['url']
         except Exception as e:
-            logger.warning(f"Raw YouTube search failed for '{query}': {e}")
-        return []
+            logger.warning(f"Smart YouTube search error for '{query}': {e}")
+        return None
+
 
     @staticmethod
     async def resolve_spotify(url):
