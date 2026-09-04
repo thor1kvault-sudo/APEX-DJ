@@ -22,7 +22,7 @@ FFMPEG_OPTIONS = {
     'options': '-vn -sn -dn',
 }
 
-# YTDLP Options for fast streaming & robust cloud compatibility
+# YTDLP Options for fast streaming & robust cloud compatibility (bypasses datacenter IP blocks)
 YTDL_FORMAT_OPTIONS = {
     'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -36,5 +36,11 @@ YTDL_FORMAT_OPTIONS = {
     'default_search': 'auto',
     'geo_bypass': True,
     'socket_timeout': 10,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'ios', 'web', 'mweb']
+        }
+    }
 }
+
 

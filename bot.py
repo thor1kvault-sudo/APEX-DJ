@@ -85,8 +85,9 @@ async def on_message(message: discord.Message):
 
                     async def connect_voice():
                         if not player.voice_client or not player.voice_client.is_connected():
-                            player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=True)
+                            player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=False)
                         elif player.voice_client.channel != voice_channel:
+
                             await player.voice_client.move_to(voice_channel)
 
                     async def resolve_tracks():

@@ -152,6 +152,17 @@ class Track:
                     logger.error(f"Stream extraction failed for {video_url}: {e}")
                     data = None
 
+                if not data:
+                    logger.info(f"YouTube stream failed. Trying SoundCloud search fallback for '{raw_user_query}'...")
+                    try:
+                        sc_query = f"scsearch:{raw_user_query}"
+                        sc_data = await loop.run_in_executor(None, lambda: ytdl.extract_info(sc_query, download=False))
+                        if sc_data and 'entries' in sc_data and sc_data['entries']:
+                            data = sc_data['entries'][0]
+                    except Exception as sc_err:
+                        logger.warning(f"SoundCloud fallback failed: {sc_err}")
+
+
 
             if not data:
                 continue
@@ -627,7 +638,7 @@ class MusicCog(commands.Cog):
         voice_channel = user.voice.channel
 
         if not player.voice_client or not player.voice_client.is_connected():
-            player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=True)
+            player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=False)
         elif player.voice_client.channel != voice_channel:
             await player.voice_client.move_to(voice_channel)
 
@@ -653,9 +664,10 @@ class MusicCog(commands.Cog):
         # 2. Parallel connect and resolve
         async def connect_voice():
             if not player.voice_client or not player.voice_client.is_connected():
-                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True, self_deaf=True)
+                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True, self_deaf=False)
             elif player.voice_client.channel != voice_channel:
                 await player.voice_client.move_to(voice_channel)
+
 
         async def resolve_tracks():
             return await Track.from_query(query, interaction.user)
