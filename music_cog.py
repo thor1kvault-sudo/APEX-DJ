@@ -476,7 +476,7 @@ class MusicPlayer:
         self.update_task = None
         self.text_channel = None
 
-    async def play_next(self):
+    async def play_next(self, send_msg=False):
         if not self.voice_client or not self.voice_client.is_connected():
             return
 
@@ -510,22 +510,30 @@ class MusicPlayer:
         self.current_track = track
         
         # Audio source setup
-        audio_source = discord.FFmpegPCMAudio(track.url, **FFMPEG_OPTIONS)
-        transformed_source = discord.PCMVolumeTransformer(audio_source, volume=self.volume)
+        try:
+            audio_source = discord.FFmpegPCMAudio(track.url, **FFMPEG_OPTIONS)
+            transformed_source = discord.PCMVolumeTransformer(audio_source, volume=self.volume)
 
-        def after_playing(error):
-            if error:
-                logger.error(f"Error in playback: {error}")
-            coro = self.play_next()
-            fut = asyncio.run_coroutine_threadsafe(coro, self.cog.bot.loop)
-            try:
-                fut.result()
-            except Exception as ex:
-                logger.error(f"Error handling after_playing: {ex}")
+            def after_playing(error):
+                if error:
+                    logger.error(f"Error in playback: {error}")
+                coro = self.play_next(send_msg=True)
+                fut = asyncio.run_coroutine_threadsafe(coro, self.cog.bot.loop)
+                try:
+                    fut.result()
+                except Exception as ex:
+                    logger.error(f"Error handling after_playing: {ex}")
 
-        self.start_time = time.time()
-        self.voice_client.play(transformed_source, after=after_playing)
-        await self.send_now_playing_message()
+            self.start_time = time.time()
+            self.voice_client.play(transformed_source, after=after_playing)
+            if send_msg:
+                await self.send_now_playing_message()
+        except Exception as e:
+            logger.error(f"Error starting audio playback: {e}")
+            if self.text_channel:
+                await self.text_channel.send(f"❌ Playback error: {e}")
+            await self.play_next(send_msg=True)
+
 
     async def send_now_playing_message(self):
         if not self.current_track or not self.text_channel:
@@ -630,30 +638,22 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="play", description="Play a song or playlist from YouTube or Spotify link/name.")
     @app_commands.describe(query="Song name, YouTube URL, or Spotify track/playlist link")
     async def slash_play(self, interaction: discord.Interaction, query: str):
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer()
-        except Exception as defer_err:
-            logger.warning(f"Defer failed: {defer_err}")
+        # 1. Immediately defer with thinking state so Discord never times out
+        await interaction.response.defer(thinking=True)
 
-        # Run voice connect + track resolution IN PARALLEL for maximum speed
         user = interaction.user
         guild = interaction.guild
         if not user.voice or not user.voice.channel:
-            try:
-                await interaction.followup.send("❌ You must be in a voice channel!", ephemeral=True)
-            except Exception:
-                pass
-            return
+            return await interaction.followup.send("❌ You must be connected to a voice channel first!", ephemeral=True)
 
         player = self.get_player(guild)
         player.text_channel = interaction.channel
         voice_channel = user.voice.channel
 
-        # Launch both tasks simultaneously
+        # 2. Parallel connect and resolve
         async def connect_voice():
             if not player.voice_client or not player.voice_client.is_connected():
-                player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=True)
+                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True, self_deaf=True)
             elif player.voice_client.channel != voice_channel:
                 await player.voice_client.move_to(voice_channel)
 
@@ -667,16 +667,15 @@ class MusicCog(commands.Cog):
             tracks = await track_task
         except Exception as e:
             logger.error(f"Play command error: {e}")
-            try:
-                await interaction.followup.send(f"❌ Failed to process: {e}")
-            except Exception:
-                await interaction.channel.send(f"❌ Failed to process: {e}")
-            return
+            return await interaction.followup.send(f"❌ Failed to process: {e}")
+
+        if not tracks:
+            return await interaction.followup.send("❌ No tracks found for that query.")
 
         player.queue.extend(tracks)
 
         if not player.voice_client.is_playing() and not player.voice_client.is_paused():
-            await player.play_next()
+            await player.play_next(send_msg=False)
             if player.current_track:
                 embed = player.build_now_playing_embed()
                 view = MusicControlView(player)
@@ -688,11 +687,9 @@ class MusicCog(commands.Cog):
         else:
             count = len(tracks)
             msg_text = f"➕ Added **{tracks[0].title}** to queue (Position #{len(player.queue)})!" if count == 1 else f"➕ Added **{count} tracks** to queue!"
-            try:
-                await interaction.followup.send(msg_text)
-            except Exception:
-                await interaction.channel.send(msg_text)
+            await interaction.followup.send(msg_text)
             await player.update_now_playing_message()
+
 
     @app_commands.command(name="skip", description="Skip the current song.")
     async def slash_skip(self, interaction: discord.Interaction):

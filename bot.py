@@ -21,10 +21,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("APEX_DJ_BOT")
 
-# Use Standard Intents with Voice States explicitly enabled for instant connection
+# Use Standard Intents with Voice States & Message Content explicitly enabled
 intents = discord.Intents.default()
 intents.voice_states = True
 intents.guilds = True
+intents.message_content = True
+
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
