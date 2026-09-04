@@ -87,27 +87,27 @@ class Track:
                 except Exception as e:
                     logger.error(f"Direct stream extraction failed: {e}")
             else:
-                # Fast single-pass search (resolves in ~1-2s directly)
-                primary_query = f"ytsearch1:{raw_user_query}" if not raw_user_query.startswith(('ytsearch:', 'ytsearch1:')) else raw_user_query
+                # 1. Instant raw YouTube search (<0.5s search + ~2s stream extract = ~3-5s total!)
                 try:
-                    search_res = await loop.run_in_executor(None, lambda q=primary_query: _cached_extract(q))
-                    if search_res and 'entries' in search_res and search_res['entries']:
-                        data = search_res['entries'][0]
-                    elif search_res and search_res.get('url'):
-                        data = search_res
+                    raw_urls = await loop.run_in_executor(None, lambda q=raw_user_query: cls.search_youtube_raw(q))
+                    if raw_urls:
+                        data = await loop.run_in_executor(None, lambda u=raw_urls[0]: _cached_extract(u))
                 except Exception as e:
-                    logger.warning(f"Fast ytsearch1 extraction failed: {e}")
+                    logger.warning(f"Raw search failed for '{raw_user_query}': {e}")
 
-                # Fast raw HTML search fallback if needed
+                # 2. Fast single-pass fallback
                 if not data:
                     try:
-                        raw_urls = await loop.run_in_executor(None, lambda q=raw_user_query: cls.search_youtube_raw(q))
-                        if raw_urls:
-                            data = await loop.run_in_executor(None, lambda u=raw_urls[0]: _cached_extract(u))
+                        primary_query = f"ytsearch1:{raw_user_query}" if not raw_user_query.startswith(('ytsearch:', 'ytsearch1:')) else raw_user_query
+                        search_res = await loop.run_in_executor(None, lambda q=primary_query: _cached_extract(q))
+                        if search_res and 'entries' in search_res and search_res['entries']:
+                            data = search_res['entries'][0]
+                        elif search_res and search_res.get('url'):
+                            data = search_res
                     except Exception as e:
-                        logger.warning(f"Raw search fallback failed: {e}")
+                        logger.warning(f"ytsearch1 fallback failed: {e}")
 
-                # SoundCloud fallback if YouTube is unavailable
+                # 3. SoundCloud fallback if YouTube is unavailable
                 if not data:
                     try:
                         sc_res = await loop.run_in_executor(None, lambda q=f"scsearch1:{raw_user_query}": _cached_extract(q))
@@ -115,6 +115,7 @@ class Track:
                             data = sc_res['entries'][0]
                     except Exception as sc_err:
                         logger.warning(f"SoundCloud fallback failed: {sc_err}")
+
 
 
 
