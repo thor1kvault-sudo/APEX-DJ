@@ -16,13 +16,13 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 EMBED_COLOR = 0xED1C24  # Vibrant Red accent color matching user screenshot
 DEFAULT_VOLUME = 1.0    # 100%
 
-# FFmpeg Options - tuned for instant playback buffering (<200ms startup)
+# FFmpeg Options - tuned for instant playback buffering and stream stability
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32768 -analyzeduration 0',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn -sn -dn',
 }
 
-# YTDLP Options for fast streaming
+# YTDLP Options for fast streaming & robust cloud compatibility
 YTDL_FORMAT_OPTIONS = {
     'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -34,6 +34,7 @@ YTDL_FORMAT_OPTIONS = {
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
-    'source_address': '0.0.0.0',
-    'socket_timeout': 5,
+    'geo_bypass': True,
+    'socket_timeout': 10,
 }
+

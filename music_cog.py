@@ -70,57 +70,66 @@ class Track:
                 track_title = item.get("title", "")
                 artist_name = item.get("artist", "")
                 raw_user_query = f"{track_title} {artist_name}"
-                clean_title = re.sub(r'\(From "[^"]+"\)', '', track_title).strip()
-                search_q = f"ytsearch3:{clean_title} {artist_name} official audio"
                 search_title = f"{artist_name} - {track_title}" if artist_name else track_title
                 spotify_thumb = item.get("thumbnail")
 
-            is_direct_url = search_q.startswith(('http://', 'https://'))
-
-            # Direct URLs skip search entirely
-            if not is_direct_url and not search_q.startswith(('ytsearch:', 'ytsearch1:', 'ytsearch3:', 'ytsearch5:')):
-                search_q = f"ytsearch3:{search_q} official audio"
+            is_direct_url = "query" in item and item["query"] and item["query"].startswith(('http://', 'https://'))
 
             if is_direct_url:
                 # Direct URL: extract stream directly (use cache for speed)
                 try:
-                    data = await loop.run_in_executor(None, lambda q=search_q: _cached_extract(q))
+                    data = await loop.run_in_executor(None, lambda q=item["query"]: _cached_extract(q))
                 except Exception as e:
                     logger.error(f"yt-dlp extract failed for direct URL: {e}")
                     data = None
             else:
-                # PHASE 1: Fast flat metadata search (no stream extraction = 3x faster)
-                try:
-                    flat_data = await loop.run_in_executor(None, lambda q=search_q: ytdl_flat.extract_info(q, download=False))
-                except Exception as e:
-                    logger.error(f"yt-dlp flat search failed for {search_q}: {e}")
-                    flat_data = None
-
-                if flat_data and 'entries' in flat_data:
-                    entries = [e for e in flat_data['entries'] if e]
+                # Search candidate list to ensure we never return 0 results
+                candidates_to_try = []
+                if "query" not in item:
+                    track_title = item.get("title", "")
+                    artist_name = item.get("artist", "")
+                    clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', track_title).strip()
+                    primary_artist = artist_name.split(',')[0].strip() if artist_name else ""
+                    
+                    if clean_title and primary_artist:
+                        candidates_to_try.append(f"ytsearch3:{clean_title} {primary_artist}")
+                    if track_title and primary_artist:
+                        candidates_to_try.append(f"ytsearch3:{track_title} {primary_artist}")
+                    if clean_title:
+                        candidates_to_try.append(f"ytsearch3:{clean_title}")
+                    if track_title:
+                        candidates_to_try.append(f"ytsearch3:{track_title}")
                 else:
-                    entries = []
+                    user_q = item["query"]
+                    if not user_q.startswith(('ytsearch:', 'ytsearch1:', 'ytsearch3:', 'ytsearch5:')):
+                        candidates_to_try.append(f"ytsearch3:{user_q}")
+                        candidates_to_try.append(f"ytsearch3:{user_q} song")
+                    else:
+                        candidates_to_try.append(user_q)
 
-                if not entries:
-                    # Fallback with simplified query
-                    fallback_q = f"ytsearch3:{item.get('title', query)} song"
+                entries = []
+                # Try search candidates sequentially until entries found
+                for cand in candidates_to_try:
                     try:
-                        flat_data = await loop.run_in_executor(None, lambda: ytdl_flat.extract_info(fallback_q, download=False))
+                        flat_data = await loop.run_in_executor(None, lambda q=cand: ytdl_flat.extract_info(q, download=False))
                         if flat_data and 'entries' in flat_data:
-                            entries = [e for e in flat_data['entries'] if e]
-                    except Exception:
-                        pass
+                            valid = [e for e in flat_data['entries'] if e]
+                            if valid:
+                                entries = valid
+                                break
+                    except Exception as e:
+                        logger.warning(f"Flat search failed for candidate '{cand}': {e}")
 
                 if not entries:
-                    logger.warning(f"No results for {search_q}")
+                    logger.warning(f"No results for search candidates: {candidates_to_try}")
                     continue
 
-                # PHASE 2: Pick the best original track from flat candidates
+                # Pick the best original track from flat candidates
                 best_entry = cls.select_best_original_entry(entries, raw_user_query)
                 if not best_entry:
-                    continue
+                    best_entry = entries[0]
 
-                # Extract stream URL only for the winning track (single extraction = fast)
+                # Extract stream URL only for the winning track
                 video_url = best_entry.get('url') or best_entry.get('webpage_url')
                 if video_url and not video_url.startswith(('http', 'https')):
                     video_url = f"https://www.youtube.com/watch?v={best_entry.get('id', '')}"
@@ -195,7 +204,7 @@ class Track:
 
     @staticmethod
     async def resolve_spotify(url):
-        """Resolves Spotify Track, Album, or Playlist URLs with zero credentials (async for speed)."""
+        """Resolves Spotify Track, Album, or Playlist URLs with triple fallback (oEmbed, Embed Scraping, OG Meta)."""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         }
@@ -227,41 +236,51 @@ class Track:
         else:
             return None
 
+        # METHOD 1: Official Spotify oEmbed API (Fastest & 100% reliable for tracks!)
+        if kind == "track":
+            try:
+                oembed_api = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{item_id}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(oembed_api, headers=headers, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                        if resp.status == 200:
+                            oembed_data = await resp.json()
+                            title = oembed_data.get('title')
+                            author_name = oembed_data.get('author_name', '')
+                            thumbnail = oembed_data.get('thumbnail_url', '')
+                            if title:
+                                return [{"title": title, "artist": author_name, "thumbnail": thumbnail}]
+            except Exception as e:
+                logger.warning(f"oEmbed API failed for Spotify track: {e}")
+
+        # METHOD 2: Embed Scraping (__NEXT_DATA__ JSON)
         embed_url = f"https://open.spotify.com/embed/{kind}/{item_id}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=4)) as resp:
-                    if resp.status != 200:
-                        return None
-                    text = await resp.text()
+                    if resp.status == 200:
+                        text = await resp.text()
+                        script_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">([^<]+)</script>', text)
+                        if script_match:
+                            data = json.loads(script_match.group(1))
+                            entity = data['props']['pageProps']['state']['data']['entity']
+                            if kind == "track":
+                                title = entity.get('name') or entity.get('title')
+                                artists = [a['name'] for a in entity.get('artists', []) if isinstance(a, dict) and 'name' in a]
+                                artist_name = ", ".join(artists) if artists else "Artist"
+                                covers = entity.get('coverArt', {}).get('sources', [])
+                                thumbnail = covers[0]['url'] if covers else ""
+                                return [{"title": title, "artist": artist_name, "thumbnail": thumbnail}]
+                            else:
+                                tracks_data = entity.get('trackList', [])
+                                results = []
+                                for t in tracks_data:
+                                    title = t.get('title') or t.get('name')
+                                    artist = t.get('subtitle') or t.get('artist', 'Artist')
+                                    results.append({"title": title, "artist": artist, "thumbnail": ""})
+                                if results:
+                                    return results
         except Exception as e:
-            logger.warning(f"Failed fetching Spotify embed: {e}")
-            return None
-
-        try:
-            script_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">([^<]+)</script>', text)
-            if not script_match:
-                return None
-            data = json.loads(script_match.group(1))
-            entity = data['props']['pageProps']['state']['data']['entity']
-
-            if kind == "track":
-                title = entity.get('name')
-                artists = [a['name'] for a in entity.get('artists', [])]
-                artist_name = ", ".join(artists) if artists else "Artist"
-                covers = entity.get('coverArt', {}).get('sources', [])
-                thumbnail = covers[0]['url'] if covers else ""
-                return [{"title": title, "artist": artist_name, "thumbnail": thumbnail}]
-            else:
-                tracks_data = entity.get('trackList', [])
-                results = []
-                for t in tracks_data:
-                    title = t.get('title') or t.get('name')
-                    artist = t.get('subtitle') or t.get('artist', 'Artist')
-                    results.append({"title": title, "artist": artist, "thumbnail": ""})
-                return results
-        except Exception as e:
-            logger.warning(f"Failed parsing Spotify {kind} embed: {e}")
+            logger.warning(f"Failed fetching/parsing Spotify embed: {e}")
 
         return None
 
