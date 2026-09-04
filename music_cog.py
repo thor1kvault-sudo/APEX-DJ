@@ -619,14 +619,18 @@ class MusicCog(commands.Cog):
 
         # 2. Parallel connect and resolve
         async def connect_voice():
-            if not player.voice_client or not player.voice_client.is_connected():
-                player.voice_client = await voice_channel.connect(timeout=15.0, reconnect=True, self_deaf=False)
-            elif player.voice_client.channel != voice_channel:
-                await player.voice_client.move_to(voice_channel)
-
+            guild_vc = guild.voice_client
+            if not guild_vc or not guild_vc.is_connected():
+                player.voice_client = await voice_channel.connect(timeout=8.0, reconnect=True, self_deaf=False)
+            elif guild_vc.channel.id != voice_channel.id:
+                await guild_vc.move_to(voice_channel)
+                player.voice_client = guild_vc
+            else:
+                player.voice_client = guild_vc
 
         async def resolve_tracks():
             return await Track.from_query(query, interaction.user)
+
 
         try:
             voice_task = asyncio.create_task(connect_voice())
