@@ -46,16 +46,20 @@ class Track:
     async def from_query(cls, query, requester):
         """Resolves Spotify, YouTube, or raw text query into one or more Track objects."""
         loop = asyncio.get_event_loop()
+        query = query.strip()
         
         # 1. Resolve Spotify URL if applicable
-        spotify_tracks = await cls.resolve_spotify(query)
+        is_spotify = "spotify.com" in query or "spotify.link" in query
+        spotify_tracks = None
+        if is_spotify:
+            spotify_tracks = await cls.resolve_spotify(query)
+
         tracks_to_process = []
-        
         if spotify_tracks:
-            # We have resolved Spotify track metadata
             tracks_to_process = spotify_tracks
+        elif is_spotify and not spotify_tracks:
+            raise ValueError(f"Could not retrieve Spotify track/playlist metadata from link: {query}")
         else:
-            # Not a Spotify URL or single YouTube / text query
             tracks_to_process = [{"query": query, "title": None, "artist": None, "thumbnail": None}]
 
         resolved_track_objects = []
@@ -96,7 +100,7 @@ class Track:
                     logger.warning(f"Smart search failed for '{raw_user_query}': {e}")
 
                 # 2. Fast single-pass fallback
-                if not data:
+                if not data or not (data.get('url') or data.get('formats')):
                     try:
                         primary_query = f"ytsearch1:{raw_user_query}" if not raw_user_query.startswith(('ytsearch:', 'ytsearch1:')) else raw_user_query
                         search_res = await loop.run_in_executor(None, lambda q=primary_query: _cached_extract(q))
@@ -108,7 +112,7 @@ class Track:
                         logger.warning(f"ytsearch1 fallback failed: {e}")
 
                 # 3. SoundCloud fallback if YouTube is unavailable
-                if not data:
+                if not data or not (data.get('url') or data.get('formats')):
                     try:
                         sc_res = await loop.run_in_executor(None, lambda q=f"scsearch1:{raw_user_query}": _cached_extract(q))
                         if sc_res and 'entries' in sc_res and sc_res['entries']:
@@ -116,15 +120,19 @@ class Track:
                     except Exception as sc_err:
                         logger.warning(f"SoundCloud fallback failed: {sc_err}")
 
-
-
-
-
-
             if not data:
                 continue
 
             stream_url = data.get('url')
+            if not stream_url and 'formats' in data and data['formats']:
+                audio_formats = [f for f in data['formats'] if f.get('acodec') != 'none' and f.get('url')]
+                if audio_formats:
+                    audio_formats.sort(key=lambda f: f.get('abr') or 0, reverse=True)
+                    stream_url = audio_formats[0].get('url')
+
+            if not stream_url:
+                continue
+
             title = search_title or data.get('title', 'Unknown Track')
             artist = item.get("artist") or data.get("uploader") or data.get("artist") or "Artist"
             duration = data.get('duration', 0)
@@ -258,17 +266,23 @@ class Track:
 
     @staticmethod
     async def resolve_spotify(url):
-
-        """Resolves Spotify Track, Album, or Playlist URLs with triple fallback (oEmbed, Embed Scraping, OG Meta)."""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        """Resolves Spotify Track, Album, or Playlist URLs with multi-tier failover (Discordbot OG scraping, Embed Scraping, oEmbed)."""
+        headers_bot = {
+            'User-Agent': 'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+        headers_browser = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
         }
         
         # Follow short links or spotify.link if provided
         if "spotify.link/" in url:
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.head(url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=3)) as r:
+                    async with session.head(url, headers=headers_browser, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=3)) as r:
                         url = str(r.url)
             except Exception as e:
                 logger.warning(f"Failed to follow spotify short link: {e}")
@@ -291,11 +305,38 @@ class Track:
         else:
             return None
 
-        # METHOD 1: Embed Scraping (__NEXT_DATA__ JSON - contains full artist list and track metadata)
+        # TIER 1: Discordbot User-Agent scraping (Instant OpenGraph metadata, unblocked on all networks)
+        if kind == "track":
+            try:
+                clean_url = f"https://open.spotify.com/track/{item_id}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(clean_url, headers=headers_bot, timeout=aiohttp.ClientTimeout(total=3.5)) as resp:
+                        if resp.status == 200:
+                            html = await resp.text()
+                            og_title = re.search(r'<meta\s+(?:property|name)=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+                            og_desc = re.search(r'<meta\s+(?:property|name)=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+                            og_image = re.search(r'<meta\s+(?:property|name)=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+                            
+                            if og_title:
+                                title = og_title.group(1).strip()
+                                artist = ""
+                                if og_desc:
+                                    desc = og_desc.group(1).strip()
+                                    parts = [p.strip() for p in re.split(r'[·•|]', desc) if p.strip()]
+                                    filtered = [p for p in parts if not re.match(r'^(Song|Album|EP|Single|\d{4})$', p, re.I)]
+                                    if filtered:
+                                        artist = filtered[0]
+                                thumbnail = og_image.group(1).strip() if og_image else ""
+                                if title and title.lower() != "spotify":
+                                    return [{"title": title, "artist": artist, "thumbnail": thumbnail}]
+            except Exception as e:
+                logger.warning(f"Tier 1 Discordbot scraping failed: {e}")
+
+        # TIER 2: Spotify Embed Scraping (__NEXT_DATA__ JSON - contains full artist list and track metadata)
         embed_url = f"https://open.spotify.com/embed/{kind}/{item_id}"
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(embed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                async with session.get(embed_url, headers=headers_browser, timeout=aiohttp.ClientTimeout(total=3.5)) as resp:
                     if resp.status == 200:
                         text = await resp.text()
                         script_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">([^<]+)</script>', text)
@@ -316,18 +357,19 @@ class Track:
                                 for t in tracks_data:
                                     title = t.get('title') or t.get('name')
                                     artist = t.get('subtitle') or t.get('artist', '')
-                                    results.append({"title": title, "artist": artist, "thumbnail": ""})
+                                    if title:
+                                        results.append({"title": title, "artist": artist, "thumbnail": ""})
                                 if results:
                                     return results
         except Exception as e:
-            logger.warning(f"Failed fetching/parsing Spotify embed: {e}")
+            logger.warning(f"Tier 2 Embed scraping failed: {e}")
 
-        # METHOD 2: Official Spotify oEmbed API (Fallback for title if embed page blocked)
+        # TIER 3: Official Spotify oEmbed API Fallback
         if kind == "track":
             try:
                 oembed_api = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{item_id}"
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(oembed_api, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    async with session.get(oembed_api, headers=headers_bot, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                         if resp.status == 200:
                             oembed_data = await resp.json()
                             title = oembed_data.get('title')
@@ -336,7 +378,7 @@ class Track:
                             if title:
                                 return [{"title": title, "artist": author_name, "thumbnail": thumbnail}]
             except Exception as e:
-                logger.warning(f"oEmbed API failed for Spotify track: {e}")
+                logger.warning(f"Tier 3 oEmbed API failed: {e}")
 
         return None
 
@@ -681,7 +723,12 @@ class MusicCog(commands.Cog):
         async def connect_voice():
             guild_vc = guild.voice_client
             if not guild_vc or not guild_vc.is_connected():
-                player.voice_client = await voice_channel.connect(timeout=8.0, reconnect=True, self_deaf=False)
+                if guild_vc:
+                    try:
+                        await guild_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=False)
             elif guild_vc.channel.id != voice_channel.id:
                 await guild_vc.move_to(voice_channel)
                 player.voice_client = guild_vc
