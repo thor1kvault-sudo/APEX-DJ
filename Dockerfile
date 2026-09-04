@@ -1,11 +1,13 @@
 FROM python:3.11-slim
 
-# Install FFmpeg and system dependencies for Discord audio streaming
+# Install FFmpeg, Node.js (for yt-dlp JS runtime), and system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    nodejs \
     git \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
+
 
 WORKDIR /app
 

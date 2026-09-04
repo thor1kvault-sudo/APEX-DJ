@@ -28,10 +28,11 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
-# Regex patterns for auto link detection
+# Regex patterns for auto link detection (matches YouTube, Spotify, spotify.link)
 URL_REGEX = re.compile(
-    r'https?://(?:www\.)?(?:youtube\.com|youtu\.be|open\.spotify\.com)/(?:watch\?v=|playlist\?|track/|album/)?[\w\-\?%&=]+'
+    r'https?://(?:www\.)?(?:youtube\.com|youtu\.be|open\.spotify\.com|spotify\.link)/[^\s]+'
 )
+
 
 @bot.event
 async def on_ready():

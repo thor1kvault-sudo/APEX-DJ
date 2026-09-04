@@ -73,7 +73,12 @@ class Track:
                 search_title = f"{artist_name} - {track_title}" if artist_name else track_title
                 spotify_thumb = item.get("thumbnail")
 
-            is_direct_url = "query" in item and item["query"] and item["query"].startswith(('http://', 'https://'))
+            is_direct_url = "query" in item and item["query"] and (
+                "youtube.com" in item["query"] or 
+                "youtu.be" in item["query"] or 
+                item["query"].endswith(('.mp3', '.m4a', '.wav', '.flac', '.ogg'))
+            )
+
 
             if is_direct_url:
                 # Direct URL: extract stream directly (use cache for speed)
@@ -120,25 +125,33 @@ class Track:
                     except Exception as e:
                         logger.warning(f"Flat search failed for candidate '{cand}': {e}")
 
-                if not entries:
-                    logger.warning(f"No results for search candidates: {candidates_to_try}")
+                video_url = None
+                if entries:
+                    best_entry = cls.select_best_original_entry(entries, raw_user_query)
+                    if not best_entry:
+                        best_entry = entries[0]
+                    video_url = best_entry.get('url') or best_entry.get('webpage_url')
+                    if video_url and not video_url.startswith(('http', 'https')):
+                        video_url = f"https://www.youtube.com/watch?v={best_entry.get('id', '')}"
+                else:
+                    logger.info(f"yt-dlp flat search returned 0 results for '{raw_user_query}'. Trying raw YouTube search scraper...")
+                    for cand in candidates_to_try:
+                        clean_cand = cand.replace("ytsearch3:", "").replace("ytsearch:", "").strip()
+                        raw_urls = await loop.run_in_executor(None, lambda q=clean_cand: cls.search_youtube_raw(q))
+                        if raw_urls:
+                            video_url = raw_urls[0]
+                            break
+
+                if not video_url:
+                    logger.warning(f"No results found for search candidates: {candidates_to_try}")
                     continue
 
-                # Pick the best original track from flat candidates
-                best_entry = cls.select_best_original_entry(entries, raw_user_query)
-                if not best_entry:
-                    best_entry = entries[0]
-
-                # Extract stream URL only for the winning track
-                video_url = best_entry.get('url') or best_entry.get('webpage_url')
-                if video_url and not video_url.startswith(('http', 'https')):
-                    video_url = f"https://www.youtube.com/watch?v={best_entry.get('id', '')}"
-                
                 try:
                     data = await loop.run_in_executor(None, lambda u=video_url: _cached_extract(u))
                 except Exception as e:
                     logger.error(f"Stream extraction failed for {video_url}: {e}")
                     data = None
+
 
             if not data:
                 continue
@@ -203,7 +216,32 @@ class Track:
         return scored_entries[0][1]
 
     @staticmethod
+    def search_youtube_raw(query):
+        """Fallback direct YouTube HTML search scraper for datacenter IPs where yt-dlp flat search is blocked."""
+        try:
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://www.youtube.com/results?search_query={encoded_query}"
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+            )
+            html = urllib.request.urlopen(req, timeout=5).read().decode('utf-8')
+            video_ids = re.findall(r'/watch\?v=([a-zA-Z0-9_-]{11})', html)
+            if video_ids:
+                seen = set()
+                unique_urls = []
+                for vid in video_ids:
+                    if vid not in seen:
+                        seen.add(vid)
+                        unique_urls.append(f"https://www.youtube.com/watch?v={vid}")
+                return unique_urls[:3]
+        except Exception as e:
+            logger.warning(f"Raw YouTube search failed for '{query}': {e}")
+        return []
+
+    @staticmethod
     async def resolve_spotify(url):
+
         """Resolves Spotify Track, Album, or Playlist URLs with triple fallback (oEmbed, Embed Scraping, OG Meta)."""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
