@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: apex-dj-bot
-    env: docker
-    plan: free
-    dockerfilePath: ./Dockerfile
-    envVars:
-      - key: DISCORD_TOKEN
-        sync: false
