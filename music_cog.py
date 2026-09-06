@@ -12,21 +12,23 @@ import yt_dlp
 # Suppress yt-dlp bug reports
 yt_dlp.utils.bug_reports_message = lambda: ''
 
-# yt-dlp configuration for audio extraction
+# yt-dlp configuration for ultra-fast audio extraction
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'extractaudio': True,
-    'audioformat': 'mp3',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
-    'noplaylist': False,
+    'noplaylist': True,
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch',
+    'default_search': 'ytsearch1:',
     'source_address': '0.0.0.0',
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    }
 }
 
 FFMPEG_OPTIONS = {
@@ -65,13 +67,20 @@ class Song:
     @classmethod
     async def create_source(cls, query: str, requester: discord.Member, loop: asyncio.AbstractEventLoop):
         """Extracts track info using yt-dlp asynchronously."""
+        search_query = query if query.startswith(('http://', 'https://')) else f"ytsearch1:{query}"
+
         data = await loop.run_in_executor(
-            None, lambda: ytdl.extract_info(query, download=False)
+            None, lambda: ytdl.extract_info(search_query, download=False)
         )
 
+        if not data:
+            raise ValueError("No audio source found.")
+
         if 'entries' in data:
-            # Took first item from a playlist or search result
-            data = data['entries'][0]
+            entries = [e for e in data['entries'] if e]
+            if not entries:
+                raise ValueError("No video results found for your query.")
+            data = entries[0]
 
         return cls(data, requester)
 
