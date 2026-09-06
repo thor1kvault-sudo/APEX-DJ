@@ -1,24 +1,27 @@
+# Use official Python runtime as base image
 FROM python:3.11-slim
 
-# Install FFmpeg, Node.js (for yt-dlp JS runtime), and system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies (FFmpeg & build essentials for PyNaCl)
+RUN apt-get update && apt-get install -y \
     ffmpeg \
-    nodejs \
-    git \
     build-essential \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-
+# Set working directory
 WORKDIR /app
 
-# Install Python dependencies
+# Copy requirements file
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy application source code
 COPY . .
 
-# Render exposes PORT dynamically (default 8080)
+# Expose HTTP port for Render web service health check
 EXPOSE 8080
 
+# Run the bot
 CMD ["python", "bot.py"]

@@ -1,9 +1,12 @@
 services:
   - type: web
-    name: apex-dj-bot
+    name: apex-dj-music-bot
     env: docker
     plan: free
+    region: oregon
     dockerfilePath: ./Dockerfile
     envVars:
       - key: DISCORD_TOKEN
         sync: false
+      - key: PORT
+        value: 8080

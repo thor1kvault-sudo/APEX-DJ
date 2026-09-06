@@ -1,13 +1,19 @@
-# Environment variables & secrets
-.env
-*.env
-
-# Python bytecode & cache
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-# Temporary / OS files
-.DS_Store
-Thumbs.db
+# Environment variables & secrets
+.env
+
+# Logs & temp files
 *.log
+scratch/
+.pytest_cache/

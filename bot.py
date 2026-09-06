@@ -1,152 +1,110 @@
+import asyncio
 import os
 import sys
-import asyncio
-import logging
-import io
-import re
+
+from aiohttp import web
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
 
-from config import DISCORD_TOKEN, BOT_PREFIX, BOT_NAME
+# Load environment variables from .env file
+load_dotenv()
 
-# UTF-8 stdout setup for Windows Console to support emojis cleanly
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+TOKEN = os.getenv("DISCORD_TOKEN")
+PORT = int(os.getenv("PORT", 8080))
+COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger("APEX_DJ_BOT")
-
-# Use Standard Intents with Voice States & Message Content explicitly enabled
+# Set up Gateway Intents
 intents = discord.Intents.default()
+intents.message_content = True
 intents.voice_states = True
 intents.guilds = True
-intents.message_content = True
+
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 
 
-bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
+async def handle_healthcheck(request):
+    """Simple HTTP endpoint for Render web service keep-alive health checks."""
+    return web.Response(text="APEX DJ is online and running!", status=200)
 
-# Regex patterns for auto link detection (matches YouTube, Spotify, spotify.link)
-URL_REGEX = re.compile(
-    r'https?://(?:www\.)?(?:youtube\.com|youtu\.be|open\.spotify\.com|spotify\.link)/[^\s]+'
-)
+
+async def start_web_server():
+    """Starts a lightweight HTTP server on PORT for cloud platforms like Render."""
+    app = web.Application()
+    app.router.add_get('/', handle_healthcheck)
+    app.router.add_get('/health', handle_healthcheck)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"[Web] Keep-alive Web Server running on port {PORT}")
 
 
 @bot.event
 async def on_ready():
-    logger.info("==================================================")
-    logger.info(f"🤖 Bot Logged In as: {bot.user.name} ({bot.user.id})")
-    logger.info(f"Connected to {len(bot.guilds)} Guild(s)")
-    logger.info("==================================================")
+    print("--------------------------------------------------")
+    print(f"[Bot] Logged in as: {bot.user.name} (ID: {bot.user.id})")
+    print(f"[Bot] PyNaCl & Voice Support: Enabled")
+    print("--------------------------------------------------")
 
-    # Sync Slash Commands globally for EVERY member in your server!
+    # Set Custom Bot Activity
+    activity = discord.Activity(
+        type=discord.ActivityType.listening,
+        name="/play | APEX DJ 🎶"
+    )
+    await bot.change_presence(activity=activity, status=discord.Status.online)
+
+    # Sync Slash Commands across all servers
     try:
         synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} Slash Commands globally for ALL server members!")
+        print(f"[Bot] Synced {len(synced)} Slash Command(s) globally.")
     except Exception as e:
-        logger.error(f"Failed to sync slash commands: {e}")
+        print(f"[Bot] Failed to sync slash commands: {e}")
 
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.listening,
-            name="Spotify & YouTube | Use /play"
-        )
-    )
 
 @bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Auto-disconnect if the bot is left alone in a voice channel."""
+    if member.id == bot.user.id:
         return
 
-    await bot.process_commands(message)
+    # Check if voice state change happened in bot's voice channel
+    guild = member.guild
+    voice_client = guild.voice_client
 
-    # Auto-play link detection for any user pasting YouTube/Spotify link
-    if not message.content.startswith(BOT_PREFIX):
-        match = URL_REGEX.search(message.content)
-        if match:
-            url = match.group(0)
-            if message.author.voice and message.author.voice.channel:
-                music_cog = bot.get_cog("MusicCog")
-                if music_cog:
-                    # Instant visual feedback so user knows bot reacted immediately
-                    try:
-                        await message.add_reaction("🎶")
-                    except Exception:
-                        pass
+    if voice_client and voice_client.channel:
+        channel = voice_client.channel
+        # Count non-bot members in channel
+        human_members = [m for m in channel.members if not m.bot]
+        if len(human_members) == 0:
+            # Wait 30 seconds before disconnecting if no one rejoins
+            await asyncio.sleep(30)
+            human_members_check = [m for m in channel.members if not m.bot]
+            if len(human_members_check) == 0 and voice_client.is_connected():
+                await voice_client.disconnect()
+                print(f"[Bot] Disconnected from empty voice channel in {guild.name}")
 
-                    logger.info(f"Auto-detected link from {message.author.name}: {url}")
-                    player = music_cog.get_player(message.guild)
-                    player.text_channel = message.channel
-                    voice_channel = message.author.voice.channel
-
-                    async def connect_voice():
-                        guild_vc = message.guild.voice_client
-                        if not guild_vc or not guild_vc.is_connected():
-                            if guild_vc:
-                                try:
-                                    await guild_vc.disconnect(force=True)
-                                except Exception:
-                                    pass
-                            player.voice_client = await voice_channel.connect(timeout=10.0, reconnect=True, self_deaf=False)
-                        elif guild_vc.channel.id != voice_channel.id:
-                            await guild_vc.move_to(voice_channel)
-                            player.voice_client = guild_vc
-                        else:
-                            player.voice_client = guild_vc
-
-                    async def resolve_tracks():
-                        from music_cog import Track
-                        return await Track.from_query(url, message.author)
-
-                    try:
-                        _, tracks = await asyncio.gather(connect_voice(), resolve_tracks())
-                        player.queue.extend(tracks)
-                        
-                        if not player.voice_client.is_playing() and not player.voice_client.is_paused():
-                            await player.play_next(send_msg=True)
-                        else:
-                            count = len(tracks)
-                            msg = f"➕ Auto-queued: **{tracks[0].title}**" if count == 1 else f"➕ Auto-queued **{count} tracks**!"
-                            await message.channel.send(msg)
-                            await player.update_now_playing_message()
-
-                    except Exception as e:
-                        logger.error(f"Auto link processing failed: {e}")
-                        try:
-                            await message.channel.send(f"❌ Could not play track: {e}")
-                        except Exception:
-                            pass
-
-from aiohttp import web
-
-async def start_health_check_server():
-    """Starts a lightweight web server on $PORT for Render health checks."""
-    port = int(os.getenv("PORT", 8080))
-    app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="🤖 APEX DJ Bot is running & healthy!"))
-    app.router.add_get("/health", lambda r: web.Response(text="OK", status=200))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logger.info(f"🌐 Render Health Check HTTP Server active on port {port}")
 
 async def main():
-    if not DISCORD_TOKEN or DISCORD_TOKEN == "YOUR_DISCORD_BOT_TOKEN_HERE":
-        logger.error("❌ CRITICAL: DISCORD_TOKEN is missing in .env file!")
-        logger.error("Please add your Bot Token to .env before starting.")
-        return
+    if not TOKEN or TOKEN == "your_discord_bot_token_here":
+        print("❌ ERROR: DISCORD_TOKEN is missing or not configured in .env file!")
+        print("Please set your DISCORD_TOKEN in .env and restart.")
+        sys.exit(1)
 
-    await start_health_check_server()
-    await bot.load_extension("music_cog")
-    await bot.start(DISCORD_TOKEN)
+    async with bot:
+        # Load Music Cog
+        await bot.load_extension("music_cog")
+        
+        # Start web server for cloud keep-alive
+        await start_web_server()
+
+        # Start Discord Bot
+        await bot.start(TOKEN)
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot execution terminated by user.")
+        print("\n👋 Bot shutting down...")
