@@ -20,7 +20,27 @@ intents.message_content = True
 intents.voice_states = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
+
+class ApexBot(commands.Bot):
+
+    def __init__(self):
+        super().__init__(command_prefix=COMMAND_PREFIX, intents=intents)
+
+    async def setup_hook(self):
+        """Runs once before the bot connects to Discord."""
+        # Load Music Cog extension
+        await self.load_extension("music_cog")
+        print("[Bot] Loaded Music Cog extension successfully.")
+
+        # Sync Slash Commands globally ONCE
+        try:
+            synced = await self.tree.sync()
+            print(f"[Bot] Synced {len(synced)} Slash Command(s) globally.")
+        except Exception as e:
+            print(f"[Bot] Failed to sync slash commands: {e}")
+
+
+bot = ApexBot()
 
 
 async def handle_healthcheck(request):
@@ -55,13 +75,6 @@ async def on_ready():
     )
     await bot.change_presence(activity=activity, status=discord.Status.online)
 
-    # Sync Slash Commands across all servers
-    try:
-        synced = await bot.tree.sync()
-        print(f"[Bot] Synced {len(synced)} Slash Command(s) globally.")
-    except Exception as e:
-        print(f"[Bot] Failed to sync slash commands: {e}")
-
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -69,16 +82,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     if member.id == bot.user.id:
         return
 
-    # Check if voice state change happened in bot's voice channel
     guild = member.guild
     voice_client = guild.voice_client
 
     if voice_client and voice_client.channel:
         channel = voice_client.channel
-        # Count non-bot members in channel
         human_members = [m for m in channel.members if not m.bot]
         if len(human_members) == 0:
-            # Wait 30 seconds before disconnecting if no one rejoins
             await asyncio.sleep(30)
             human_members_check = [m for m in channel.members if not m.bot]
             if len(human_members_check) == 0 and voice_client.is_connected():
@@ -93,9 +103,6 @@ async def main():
         sys.exit(1)
 
     async with bot:
-        # Load Music Cog
-        await bot.load_extension("music_cog")
-        
         # Start web server for cloud keep-alive
         await start_web_server()
 
